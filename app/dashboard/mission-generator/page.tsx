@@ -972,8 +972,8 @@ export default function MissionGeneratorPage() {
           } to Supabase storage.`
       )
 
-      handleResetForm()
-      setShowMissionPrompt(null)
+      // handleResetForm()
+      // setShowMissionPrompt(null)
     } catch (error: any) {
       setImageUploadError(error?.message || 'Failed to upload images to Supabase.')
     } finally {
@@ -1126,7 +1126,7 @@ export default function MissionGeneratorPage() {
           notifyAdmin(successMsg)
         } else {
           const response = await fetch('/api/missions/upload', {
-            method: 'POST',
+            method: 'PUT',
             body: payload
           })
 
