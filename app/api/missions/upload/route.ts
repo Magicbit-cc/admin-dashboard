@@ -4,7 +4,7 @@ import { supabaseAdmin } from '@/lib/supabase'
 // Add this helper at module-level (top of function is fine, not inside blocks)
 function pad2(n: number): string { return n < 10 ? '0' + n : '' + n; }
 
-export async function POST(request: NextRequest) {
+export async function PUT(request: NextRequest) {
   try {
     const formData = await request.formData()
     const jsonFile = formData.get('json') as File
