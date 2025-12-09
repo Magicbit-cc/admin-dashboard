@@ -401,7 +401,7 @@ export default function MissionGeneratorPage() {
   const [customMissionUid, setCustomMissionUid] = useState('')
   const [customImageFolder, setCustomImageFolder] = useState('')
   const [customOrderNo, setCustomOrderNo] = useState('')
-  const [showMissionPrompt, setShowMissionPrompt] = useState<null | 'images' | 'json'>(null)
+  const [showMissionPrompt, setShowMissionPrompt] = useState<null | 'images' | 'json' | 'complete'>(null)
   const [loadMissionUid, setLoadMissionUid] = useState('')
   const [loadingMission, setLoadingMission] = useState(false)
   const [loadMissionError, setLoadMissionError] = useState('')
@@ -414,6 +414,12 @@ export default function MissionGeneratorPage() {
   const [missionOptions, setMissionOptions] = useState<Array<{ mission_uid: string; title: string }>>([])
   const [loadingMissions, setLoadingMissions] = useState(false)
   const [selectedMissionUid, setSelectedMissionUid] = useState('')
+
+  // Add a new state for the combined upload process
+  const [uploadingComplete, setUploadingComplete] = useState(false)
+
+  // Add new state to track image replacements
+  const [replacedImages, setReplacedImages] = useState<Record<string, string>>({})
 
   const assignAssetName = (file: File, previousName?: string) => {
     if (!file) return previousName || ''
@@ -429,6 +435,12 @@ export default function MissionGeneratorPage() {
       const next = { ...prev }
 
       if (previousName && next[previousName]) {
+        // Track image replacement
+        setReplacedImages((prevReplaced) => ({
+          ...prevReplaced,
+          [previousName]: 'replaced'
+        }))
+        
         delete next[previousName]
         setAssetPreviews((prevPreviews) => {
           if (prevPreviews[previousName]) {
@@ -484,6 +496,36 @@ export default function MissionGeneratorPage() {
       delete next[name]
       return next
     })
+  }
+
+  // Add function to delete replaced images
+  const deleteReplacedImages = async (missionUid: string) => {
+    const imagesToDelete = Object.keys(replacedImages)
+    if (imagesToDelete.length === 0) return
+
+    try {
+      const deletePromises = imagesToDelete.map(async (imagePath) => {
+        const response = await fetch('/api/missions/delete-image', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mission_uid: missionUid,
+            image_path: imagePath,
+            image_folder: customImageFolder.trim() || undefined
+          })
+        })
+        
+        if (!response.ok) {
+          const result = await response.json()
+          console.warn(`Failed to delete ${imagePath}:`, result.error)
+        }
+      })
+
+      await Promise.all(deletePromises)
+      console.log(`Deleted ${imagesToDelete.length} replaced images`)
+    } catch (error: any) {
+      console.warn('Some images may not have been deleted:', error.message)
+    }
   }
 
   const generateJSON = () => {
@@ -608,6 +650,7 @@ export default function MissionGeneratorPage() {
     }
     setAssetFiles({})
     setAssetPreviews({})
+    setReplacedImages({}) // Clear replaced images tracking
     setUploadErrorMessage('')
     setUploadSuccessMessage('')
     setImageUploadError('')
@@ -1152,6 +1195,166 @@ export default function MissionGeneratorPage() {
       setUploadErrorMessage(error?.message || 'Failed to upload mission to Supabase.')
     } finally {
       setUploadingToSupabase(false)
+    }
+  }
+
+  // Create a new combined upload function
+  const handleCompleteUpload = async () => {
+    setUploadErrorMessage('')
+    setUploadSuccessMessage('')
+    setImageUploadError('')
+    setImageUploadSuccess('')
+    setUploadingComplete(true)
+
+    try {
+      const missionUid = determineMissionUid(formData)
+      if (!missionUid) {
+        throw new Error('Mission UID is required for uploading.')
+      }
+
+      // Step 1: Delete replaced images if we're editing an existing mission
+      if ((editingMode === 'table' || editingMode === 'storage') && Object.keys(replacedImages).length > 0) {
+        await deleteReplacedImages(missionUid)
+        setReplacedImages({}) // Clear replaced images tracking
+      }
+
+      // Step 2: Upload new/updated images if there are any pending
+      const pendingEntries = Object.entries(assetFiles)
+      if (pendingEntries.length > 0) {
+        const imagePayload = new FormData()
+        imagePayload.append('mission_uid', missionUid)
+        if (customImageFolder.trim()) {
+          imagePayload.append('image_folder', customImageFolder.trim())
+        }
+
+        pendingEntries.forEach(([path, file]) => {
+          const filename = path.split('/').pop() || sanitizeFileName(file.name)
+          const renamedFile = new File([file], filename, {
+            type: file.type || 'application/octet-stream',
+            lastModified: file.lastModified
+          })
+          imagePayload.append('images', renamedFile)
+          imagePayload.append('paths[]', path)
+        })
+
+        const imageResponse = await fetch('/api/missions/upload-images', {
+          method: 'POST',
+          body: imagePayload
+        })
+
+        const imageResult = await imageResponse.json()
+
+        if (!imageResponse.ok) {
+          throw new Error(imageResult.error || 'Failed to upload images')
+        }
+
+        // Clear uploaded assets
+        setAssetFiles({})
+        setAssetPreviews({})
+        
+        setImageUploadSuccess(
+          imageResult.message ||
+            `Uploaded ${Object.keys(imageResult.uploadedImages || {}).length} image${
+              Object.keys(imageResult.uploadedImages || {}).length === 1 ? '' : 's'
+            } to storage.`
+        )
+      }
+
+      // Step 3: Upload mission JSON
+      const missionJson = JSON.stringify(formData, null, 2)
+      setJsonOutput(missionJson)
+
+      const jsonBlob = new Blob([missionJson], { type: 'application/json' })
+      const jsonFile = new File([jsonBlob], 'mission.json', { type: 'application/json' })
+      
+      if (editingMode === 'storage' && editingStorageFile) {
+        const response = await fetch(
+          `/api/missions/storage-json/${encodeURIComponent(editingStorageFile)}`,
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mission_data: formData })
+          }
+        )
+
+        const result = await response.json()
+
+        if (!response.ok) {
+          throw new Error(result.error || result.message || 'Failed to update mission JSON.')
+        }
+
+        const successMsg =
+          result.message || `Mission JSON '${editingStorageFile}' updated successfully.`
+        setUploadSuccessMessage(successMsg)
+        notifyAdmin(successMsg)
+      } else {
+        const payload = new FormData()
+        payload.append('json', jsonFile)
+
+        const title = formData.title?.trim()
+        if (title) {
+          payload.append('title', title)
+        }
+
+        if (missionUid) {
+          payload.append('mission_uid', missionUid)
+        }
+        if (customOrderNo.trim()) {
+          payload.append('order_no', customOrderNo.trim())
+        }
+        if (customImageFolder.trim()) {
+          payload.append('image_folder', customImageFolder.trim())
+        }
+
+        // Note: No need to append images here since they were already uploaded in step 2
+
+        if (editingMode === 'table' && editingMissionUid) {
+          const response = await fetch(`/api/missions/${encodeURIComponent(missionUid)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              mission_data: formData,
+              title: formData.title,
+              description: formData.description,
+              order_no: customOrderNo ? Number(customOrderNo) : undefined,
+              assets_prefix: customImageFolder || null
+            })
+          })
+
+          const result = await response.json()
+
+          if (!response.ok) {
+            throw new Error(result.error || result.message || 'Failed to update mission.')
+          }
+
+          const successMsg = result.message || 'Mission updated successfully!'
+          setUploadSuccessMessage(successMsg)
+          notifyAdmin(successMsg)
+        } else {
+          const response = await fetch('/api/missions/upload', {
+            method: 'PUT',
+            body: payload
+          })
+
+          const result = await response.json()
+
+          if (!response.ok) {
+            throw new Error(result.error || result.message || 'Failed to upload mission.')
+          }
+
+          const successMsg =
+            result.message || 'Mission uploaded successfully!'
+          setUploadSuccessMessage(successMsg)
+          notifyAdmin(successMsg)
+        }
+      }
+
+      handleResetForm()
+    } catch (error: any) {
+      setUploadErrorMessage(error?.message || 'Failed to complete upload.')
+      setImageUploadError(error?.message || 'Failed to complete upload.')
+    } finally {
+      setUploadingComplete(false)
     }
   }
 
@@ -2050,28 +2253,11 @@ export default function MissionGeneratorPage() {
                 Generate JSON
               </button>
               <button
-                onClick={() => setShowMissionPrompt('images')}
-                disabled={uploadingImages || Object.keys(assetFiles).length === 0}
-                className="w-full px-6 py-3 bg-amber-500 text-white rounded-md hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-sm"
-              >
-                {uploadingImages ? (
-                  <>
-                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                    Uploading images...
-                  </>
-                ) : (
-                  <>
-                    <Upload className="h-5 w-5" />
-                    Upload Images to Storage
-                  </>
-                )}
-              </button>
-              <button
-                onClick={() => setShowMissionPrompt('json')}
-                disabled={uploadingToSupabase}
+                onClick={() => setShowMissionPrompt('complete')}
+                disabled={uploadingComplete}
                 className="w-full px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
-                {uploadingToSupabase ? (
+                {uploadingComplete ? (
                   <>
                     <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
                     Uploading...
@@ -2079,7 +2265,7 @@ export default function MissionGeneratorPage() {
                 ) : (
                   <>
                     <Upload className="h-5 w-5" />
-                    Upload to Supabase
+                    Complete Upload
                   </>
                 )}
               </button>
@@ -2182,9 +2368,17 @@ export default function MissionGeneratorPage() {
       </div>
       {showMissionPrompt && (
         <UploadPrompt
-          title={showMissionPrompt === 'json' ? 'Upload Mission to Supabase' : 'Upload Images to Storage'}
+          title={
+            showMissionPrompt === 'complete' 
+              ? 'Complete Upload to Supabase' 
+              : showMissionPrompt === 'json' 
+              ? 'Upload Mission to Supabase' 
+              : 'Upload Images to Storage'
+          }
           description={
-            showMissionPrompt === 'json'
+            showMissionPrompt === 'complete'
+              ? 'Upload images (if any) and mission data to Supabase in one step.'
+              : showMissionPrompt === 'json'
               ? 'Set the mission UID and optional image folder before uploading to Supabase.'
               : 'Set the mission UID and optional image folder before uploading images to storage.'
           }
@@ -2204,11 +2398,26 @@ export default function MissionGeneratorPage() {
               helper: 'Defaults to MUID/images when left blank.'
             }
           ]}
-          confirmLabel={showMissionPrompt === 'json' ? 'Upload Mission' : 'Upload Images'}
-          loading={showMissionPrompt === 'json' ? uploadingToSupabase : uploadingImages}
+          confirmLabel={
+            showMissionPrompt === 'complete' 
+              ? 'Complete Upload' 
+              : showMissionPrompt === 'json' 
+              ? 'Upload Mission' 
+              : 'Upload Images'
+          }
+          loading={
+            showMissionPrompt === 'complete' 
+              ? uploadingComplete 
+              : showMissionPrompt === 'json' 
+              ? uploadingToSupabase 
+              : uploadingImages
+          }
           onCancel={() => setShowMissionPrompt(null)}
           onConfirm={() => {
-            if (showMissionPrompt === 'json') {
+            if (showMissionPrompt === 'complete') {
+              setShowMissionPrompt(null)
+              handleCompleteUpload()
+            } else if (showMissionPrompt === 'json') {
               setShowMissionPrompt(null)
               uploadToSupabase()
             } else {
